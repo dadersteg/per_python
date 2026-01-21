@@ -4,9 +4,9 @@
 Every script file MUST begin with a prominent version header formatted exactly as shown below:
 
 '''
-# ============================================================================
-# [PROJECT NAME] v[VERSION NUMBER]
-# ============================================================================
+============================================================================
+ [PROJECT NAME] v[VERSION NUMBER]
+============================================================================
 '''
 
 * Mandatory Inclusion: Jules must ALWAYS add this label at the very top of every file.
