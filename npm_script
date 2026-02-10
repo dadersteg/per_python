@@ -1,29 +1,41 @@
+# ============================================================================
+#  NIAP Governance Reconciliation v1.1.0
+# ============================================================================
+
 """
-# -----------------------------------------------------------------------------
-# BLUF (BOTTOM LINE UP FRONT):
-# This engine creates a bi-directional "Master Spine" that reconciles every 
-# NIAP Governance Ticket against every Product Register entry. It identifies 
-# gaps in both directions: tickets without products and products without tickets.
-# -----------------------------------------------------------------------------
-# PURPOSE: 
-# To provide Afonso and POs with a single, filterable "Venn Diagram" table for 
-# forensic investigation into "Approved for Launch" gaps and "Shadow IT."
-# -----------------------------------------------------------------------------
+EXECUTIVE SUMMARY (BLUF)
+This engine creates a bi-directional "Master Spine" that reconciles every
+NIAP Governance Ticket against every Product Register entry. It identifies
+gaps in both directions: tickets without products and products without tickets.
+
+Main Benefit: Provides a single, filterable "Venn Diagram" table for forensic
+investigation into "Approved for Launch" gaps and "Shadow IT," helping
+stakeholders identify compliance risks and unmanaged products.
+
+Business Problem: Solves the lack of visibility into the alignment between
+governance tickets (Jira) and the actual Product Register.
 """
 
+import os
+import logging
 import pandas as pd
 import json
 import re
 import time
 import numpy as np
-import traceback
 from datetime import datetime
 from rapidfuzz import process, fuzz, utils
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # -----------------------------------------------------------------------------
 # 1. SETUP: Configuration and File Naming
 # -----------------------------------------------------------------------------
-TARGET_FOLDER_ID = "15xKraT4MhWzBvOjMTJ0x21TBIopqfl4E"
+TARGET_FOLDER_ID = os.environ.get("TARGET_FOLDER_ID")
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M")
 
 # Core Artifacts
@@ -44,7 +56,15 @@ TXT_METADATA = f"audit_provenance_metadata_{TIMESTAMP}.txt"
 # -----------------------------------------------------------------------------
 
 def df_to_markdown_manual(df, headers=None):
-    """Formats data into clean Markdown tables without f-string backslash errors."""
+    """Formats data into clean Markdown tables without f-string backslash errors.
+
+    Args:
+        df: The pandas DataFrame or Series to format.
+        headers: Optional list of header names for the table.
+
+    Returns:
+        A string containing the Markdown table.
+    """
     if df.empty: return "No data available."
     
     if isinstance(df, pd.Series):
@@ -73,14 +93,28 @@ def df_to_markdown_manual(df, headers=None):
     return f"{header_row}\n{sep_row}\n" + "\n".join(body)
 
 def normalize_name(text):
-    """Clean standard for cross-source matching."""
+    """Clean standard for cross-source matching.
+
+    Args:
+        text: The string to be normalized.
+
+    Returns:
+        A normalized version of the input string.
+    """
     if pd.isna(text): return ""
     text = str(text).lower()
     text = re.split(r'[|·]', text)[-1].strip() 
     return utils.default_process(text)
 
 def clean_tech_family(text):
-    """Aggregates technical configurations into clean product families."""
+    """Aggregates technical configurations into clean product families.
+
+    Args:
+        text: The technical configuration string.
+
+    Returns:
+        A cleaned product family name.
+    """
     if pd.isna(text): return ""
     text = str(text).upper()
     text = re.sub(r'_(GB|EUR|US|AU|NZ|SG|JP|RO|FR|PL|ES|IT|IE)_?', ' ', text)
@@ -89,34 +123,59 @@ def clean_tech_family(text):
     return " ".join(re.sub(r'[^A-Z0-9\s]', ' ', text).split()).lower()
 
 def upload_to_drive(file_path, mime_type):
+    """Uploads a file to Google Drive with retries.
+
+    Args:
+        file_path: Path to the file to be uploaded.
+        mime_type: MIME type of the file.
+    """
+    if not TARGET_FOLDER_ID:
+        logging.error("TARGET_FOLDER_ID is not configured. Skipping upload for %s", file_path)
+        return
+
     for attempt in range(3):
         try:
             upload_file_to_gdrive(file=file_path, name=file_path, mime_type=mime_type, folder_id=TARGET_FOLDER_ID)
             return
-        except Exception: time.sleep(5)
+        except Exception as e:
+            logging.warning("Upload failed for %s on attempt %d: %s", file_path, attempt + 1, e)
+            if attempt < 2:
+                time.sleep(5)
+    logging.error("Failed to upload %s after 3 attempts.", file_path)
 
 # -----------------------------------------------------------------------------
 # 3. PIPELINE: Bi-Directional Reconciliation
 # -----------------------------------------------------------------------------
 
 def run_master_audit():
+    """Executes the bi-directional reconciliation pipeline between NIAP and Product Register.
+
+    This function performs the following steps:
+    1. Extracts source data from Zeus.
+    2. Standardizes statuses and creates normalization keys.
+    3. Builds the Master Reconciliation Spine.
+    4. Attaches technical footprints.
+    5. Calculates metrics and generates a forensic report.
+    6. Saves and uploads all artifacts to Google Drive.
+    """
     try:
-        print(f"[{datetime.now()}] PHASE A: Extracting Source Data...")
+        # Step 1: Extract Source Data
+        logging.info("PHASE A: Extracting Source Data...")
         with zeus() as cur:
             df_jira = execute_sql(cur, "SELECT issue_id, summary, issue_status, product_register_link FROM global_entity_operations.jira_niap_initiatives", None)
             df_reg  = execute_sql(cur, "SELECT name, niap, product_status FROM global_entity_operations.niap_product_register", None)
             df_core = execute_sql(cur, "SELECT product_type, name, COUNT(*) as risk_volume FROM core.products WHERE (decommission_date IS NULL OR decommission_date > CURRENT_DATE) GROUP BY 1, 2", None)
             df_comp = execute_sql(cur, "SELECT name, business_impact_assessment_importance_score as bia FROM global_entity_operations.sdm_service_catalogue_v3_process_component WHERE type = 'PRODUCT'", None)
 
-        # Standardize Statuses
+        # Step 2: Standardize Statuses and Create Normalization Keys
         df_reg['product_status'] = df_reg['product_status'].fillna('Unknown')
         
-        # Create Normalization Keys
+        # Create Normalization Keys for bi-directional matching
         df_jira['join_key'] = df_jira['summary'].apply(normalize_name)
         df_reg['join_key'] = df_reg['name'].apply(normalize_name)
 
-        # --- PHASE 1: CREATE MASTER RECONCILIATION SPINE (OUTER JOIN) ---
-        print(f"[{datetime.now()}] Building Master Reconciliation Spine...")
+        # Step 3: Create Master Reconciliation Spine (Outer Join)
+        logging.info("Building Master Reconciliation Spine...")
         df_spine = pd.merge(
             df_jira, 
             df_reg, 
@@ -126,26 +185,34 @@ def run_master_audit():
         )
 
         def categorize_overlap(row):
+            """Categorizes the reconciliation outcome for a single row.
+
+            Args:
+                row: A row from the merged DataFrame.
+
+            Returns:
+                A string describing the reconciliation outcome.
+            """
             if pd.notna(row['issue_id']) and pd.notna(row['name']): return "MATCHED"
             if pd.notna(row['issue_id']): return "JIRA_ONLY (Unmapped Ticket)"
             return "REGISTER_ONLY (Unmapped Product)"
         
         df_spine['reconciliation_outcome'] = df_spine.apply(categorize_overlap, axis=1)
 
-        # --- PHASE 2: ATTACH FOOTPRINTS ---
-        print(f"[{datetime.now()}] Attaching Footprints...")
+        # Step 4: Attach Footprints (Technical Exposure)
+        logging.info("Attaching Footprints...")
         df_core['clean_family'] = df_core['name'].apply(clean_tech_family)
         core_lookup = df_core.groupby('clean_family')['risk_volume'].sum().to_dict()
         df_spine['associated_tech_vol'] = df_spine['join_key'].map(core_lookup).fillna(0)
 
-        # --- PHASE 3: METRICS ---
+        # Step 5: Generate Metrics and Gaps
         venn_metrics = df_spine['reconciliation_outcome'].value_counts()
         jira_gaps = df_spine[
             (df_spine['reconciliation_outcome'] == "JIRA_ONLY (Unmapped Ticket)") & 
             (df_spine['issue_status'].isin(['Approved for Launch', 'Monitoring', 'Development']))
         ][['issue_id', 'summary', 'issue_status']].head(50)
 
-        # --- PHASE 4: GENERATE COMPLETE TABLE OF CONTENTS ---
+        # Step 6: Generate Table of Contents
         # NOW INCLUDES ALL 7 EXPORTED FILES
         toc_data = [
             {"What": "The Manifest (This file).", "Why": "Inventory of all files delivered in this export."},
@@ -162,7 +229,7 @@ def run_master_audit():
         df_toc.index.name = "Filename"
         df_toc = df_toc.reset_index()
 
-        # --- 5. REPORT GENERATION ---
+        # Step 7: Generate Forensic Markdown Report
         md_report = f"""# NIAP to Product Mapping: Forensic Reconciliation Report
 
 ## 1. The Venn Diagram (Master Reconciliation Overview)
@@ -191,7 +258,7 @@ def run_master_audit():
 *Definition: Aggregated technical families with no NIAP link, sorted by volume.*
 {df_to_markdown_manual(df_core.groupby('clean_family')['risk_volume'].sum().sort_values(ascending=False).head(20))}
 """
-        # --- 6. SAVE & UPLOAD ---
+        # Step 8: Save and Upload Artifacts
         with open(REPORT_MD, 'w') as f: f.write(md_report)
         with open(TXT_METADATA, 'w') as f: f.write(f"NIAP AUDIT LOG\nTimestamp: {datetime.now()}\nLogic: Bi-Directional Spine")
         
@@ -201,15 +268,15 @@ def run_master_audit():
         df_core[~df_core['clean_family'].isin(df_spine['join_key'])].to_csv(CSV_BASE_1_GAPS, index=False)
         df_comp.to_csv(CSV_BASE_2, index=False)
 
-        print(f"[{datetime.now()}] Uploading to Drive...")
+        logging.info("Uploading to Drive...")
         for artifact in [CSV_TOC, CSV_MASTER_SPINE, REPORT_MD, CSV_BASE_0, CSV_BASE_1_GAPS, CSV_BASE_2, TXT_METADATA]:
             mime = "text/csv" if ".csv" in artifact else ("text/markdown" if ".md" in artifact else "text/plain")
             upload_to_drive(artifact, mime)
 
-        print(f"\n✅ RECONCILIATION COMPLETE.\nTable of Contents: {CSV_TOC}\nMaster Investigation File: {CSV_MASTER_SPINE}")
+        logging.info("RECONCILIATION COMPLETE. Table of Contents: %s, Master Investigation File: %s", CSV_TOC, CSV_MASTER_SPINE)
 
     except Exception: 
-        traceback.print_exc()
+        logging.exception("An error occurred during the master audit pipeline.")
 
 if __name__ == "__main__":
     run_master_audit()
