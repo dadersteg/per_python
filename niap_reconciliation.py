@@ -183,6 +183,9 @@ def upload_to_drive(file_path, mime_type):
     Args:
         file_path (str): The path to the file to upload.
         mime_type (str): The MIME type of the file.
+
+    Returns:
+        None
     """
     for attempt in range(3):
         try:
@@ -201,7 +204,14 @@ def upload_to_drive(file_path, mime_type):
 # -----------------------------------------------------------------------------
 
 def run_master_audit():
-    """Executes the master audit reconciliation process."""
+    """Executes the master audit reconciliation process.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
     try:
         # Step 1: Extract Source Data
         logger.info(f"PHASE A: Extracting Source Data...")
