@@ -1,24 +1,27 @@
 """
-# -----------------------------------------------------------------------------
-# BLUF (BOTTOM LINE UP FRONT):
-# This engine creates a bi-directional "Master Spine" that reconciles every 
-# NIAP Governance Ticket against every Product Register entry. It identifies 
-# gaps in both directions: tickets without products and products without tickets.
-# -----------------------------------------------------------------------------
-# PURPOSE: 
-# To provide Afonso and POs with a single, filterable "Venn Diagram" table for 
-# forensic investigation into "Approved for Launch" gaps and "Shadow IT."
-# -----------------------------------------------------------------------------
+============================================================================
+ NIAP Master Spine Reconciliation v1.0.0
+============================================================================
+
+EXECUTIVE SUMMARY (BLUF)
+This engine creates a bi-directional "Master Spine" that reconciles every
+NIAP Governance Ticket against every Product Register entry. It identifies
+gaps in both directions: tickets without products and products without tickets.
+
+Main Benefit: Provides Afonso and POs with a single, filterable "Venn Diagram"
+table for forensic investigation into "Approved for Launch" gaps and "Shadow IT."
+
+Business Logic: Reconciles governance tickets against the product register
+to ensure all launched products have proper NIAP governance.
 """
 
 import pandas as pd
-import json
 import re
 import time
-import numpy as np
 import traceback
+import logging
 from datetime import datetime
-from rapidfuzz import process, fuzz, utils
+from rapidfuzz import utils
 
 # -----------------------------------------------------------------------------
 # 1. SETUP: Configuration and File Naming
@@ -44,7 +47,18 @@ TXT_METADATA = f"audit_provenance_metadata_{TIMESTAMP}.txt"
 # -----------------------------------------------------------------------------
 
 def df_to_markdown_manual(df, headers=None):
-    """Formats data into clean Markdown tables without f-string backslash errors."""
+    """Formats a DataFrame into a clean Markdown table.
+
+    Why: To provide a human-readable table format in the forensic report without
+    encountering common f-string backslash errors.
+
+    Args:
+        df (pd.DataFrame or pd.Series): The data to format into a table.
+        headers (list, optional): Custom headers for the table. Defaults to None.
+
+    Returns:
+        str: A Markdown formatted string representing the table.
+    """
     if df.empty: return "No data available."
     
     if isinstance(df, pd.Series):
@@ -73,14 +87,34 @@ def df_to_markdown_manual(df, headers=None):
     return f"{header_row}\n{sep_row}\n" + "\n".join(body)
 
 def normalize_name(text):
-    """Clean standard for cross-source matching."""
+    """Cleans and standardizes names for cross-source matching.
+
+    Why: To ensure consistent matching between different data sources (e.g., Jira
+    vs Product Register) by removing noise and standardizing casing.
+
+    Args:
+        text (str): The text to normalize.
+
+    Returns:
+        str: The normalized text.
+    """
     if pd.isna(text): return ""
     text = str(text).lower()
     text = re.split(r'[|·]', text)[-1].strip() 
     return utils.default_process(text)
 
 def clean_tech_family(text):
-    """Aggregates technical configurations into clean product families."""
+    """Aggregates technical configurations into clean product families.
+
+    Why: To simplify complex technical names by removing environment-specific
+    suffixes and common product prefixes, allowing for better aggregation.
+
+    Args:
+        text (str): The technical name to clean.
+
+    Returns:
+        str: The cleaned product family name.
+    """
     if pd.isna(text): return ""
     text = str(text).upper()
     text = re.sub(r'_(GB|EUR|US|AU|NZ|SG|JP|RO|FR|PL|ES|IT|IE)_?', ' ', text)
@@ -89,6 +123,15 @@ def clean_tech_family(text):
     return " ".join(re.sub(r'[^A-Z0-9\s]', ' ', text).split()).lower()
 
 def upload_to_drive(file_path, mime_type):
+    """Uploads a file to Google Drive with retries.
+
+    Why: To ensure the generated forensic reports and data files are safely
+    archived in a shared location for stakeholder review.
+
+    Args:
+        file_path (str): The path to the file to upload.
+        mime_type (str): The MIME type of the file.
+    """
     for attempt in range(3):
         try:
             upload_file_to_gdrive(file=file_path, name=file_path, mime_type=mime_type, folder_id=TARGET_FOLDER_ID)
@@ -100,8 +143,21 @@ def upload_to_drive(file_path, mime_type):
 # -----------------------------------------------------------------------------
 
 def run_master_audit():
+    """Main pipeline for the bi-directional NIAP reconciliation audit.
+
+    Why: To identify gaps between governance tickets and registered products,
+    providing forensic insights into approved launches and potential shadow IT.
+
+    Steps:
+        1. Extract data from various sources (Jira, Register, Core).
+        2. Standardize and normalize data keys.
+        3. Perform a bi-directional outer join to identify discrepancies.
+        4. Attach technical footprints to identified gaps.
+        5. Generate a comprehensive forensic report and supporting data files.
+        6. Upload all artifacts to Google Drive.
+    """
     try:
-        print(f"[{datetime.now()}] PHASE A: Extracting Source Data...")
+        logging.info("PHASE A: Extracting Source Data...")
         with zeus() as cur:
             df_jira = execute_sql(cur, "SELECT issue_id, summary, issue_status, product_register_link FROM global_entity_operations.jira_niap_initiatives", None)
             df_reg  = execute_sql(cur, "SELECT name, niap, product_status FROM global_entity_operations.niap_product_register", None)
@@ -116,7 +172,7 @@ def run_master_audit():
         df_reg['join_key'] = df_reg['name'].apply(normalize_name)
 
         # --- PHASE 1: CREATE MASTER RECONCILIATION SPINE (OUTER JOIN) ---
-        print(f"[{datetime.now()}] Building Master Reconciliation Spine...")
+        logging.info("Building Master Reconciliation Spine...")
         df_spine = pd.merge(
             df_jira, 
             df_reg, 
@@ -126,6 +182,14 @@ def run_master_audit():
         )
 
         def categorize_overlap(row):
+            """Categorizes the reconciliation outcome for a given row in the spine.
+
+            Args:
+                row (pd.Series): A row from the merged DataFrame.
+
+            Returns:
+                str: The reconciliation category.
+            """
             if pd.notna(row['issue_id']) and pd.notna(row['name']): return "MATCHED"
             if pd.notna(row['issue_id']): return "JIRA_ONLY (Unmapped Ticket)"
             return "REGISTER_ONLY (Unmapped Product)"
@@ -133,7 +197,7 @@ def run_master_audit():
         df_spine['reconciliation_outcome'] = df_spine.apply(categorize_overlap, axis=1)
 
         # --- PHASE 2: ATTACH FOOTPRINTS ---
-        print(f"[{datetime.now()}] Attaching Footprints...")
+        logging.info("Attaching Footprints...")
         df_core['clean_family'] = df_core['name'].apply(clean_tech_family)
         core_lookup = df_core.groupby('clean_family')['risk_volume'].sum().to_dict()
         df_spine['associated_tech_vol'] = df_spine['join_key'].map(core_lookup).fillna(0)
@@ -201,15 +265,17 @@ def run_master_audit():
         df_core[~df_core['clean_family'].isin(df_spine['join_key'])].to_csv(CSV_BASE_1_GAPS, index=False)
         df_comp.to_csv(CSV_BASE_2, index=False)
 
-        print(f"[{datetime.now()}] Uploading to Drive...")
+        logging.info("Uploading to Drive...")
         for artifact in [CSV_TOC, CSV_MASTER_SPINE, REPORT_MD, CSV_BASE_0, CSV_BASE_1_GAPS, CSV_BASE_2, TXT_METADATA]:
             mime = "text/csv" if ".csv" in artifact else ("text/markdown" if ".md" in artifact else "text/plain")
             upload_to_drive(artifact, mime)
 
-        print(f"\n✅ RECONCILIATION COMPLETE.\nTable of Contents: {CSV_TOC}\nMaster Investigation File: {CSV_MASTER_SPINE}")
+        logging.info("RECONCILIATION COMPLETE.\nTable of Contents: %s\nMaster Investigation File: %s", CSV_TOC, CSV_MASTER_SPINE)
 
     except Exception: 
-        traceback.print_exc()
+        logging.exception("An error occurred during the master audit execution.")
 
 if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     run_master_audit()
