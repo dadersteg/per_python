@@ -1,6 +1,6 @@
 '''
 ============================================================================
-[NIAP RECONCILIATION ENGINE] v1.0.1
+[NIAP RECONCILIATION ENGINE] v1.0.2
 ============================================================================
 '''
 
@@ -254,14 +254,20 @@ def run_master_audit():
             suffixes=('_jira', '_reg')
         )
 
-        def categorize_overlap(row):
-            if pd.notna(row['issue_id']) and pd.notna(row['name']):
-                return "MATCHED"
-            if pd.notna(row['issue_id']):
-                return "JIRA_ONLY (Unmapped Ticket)"
-            return "REGISTER_ONLY (Unmapped Product)"
-
-        df_spine['reconciliation_outcome'] = df_spine.apply(categorize_overlap, axis=1)
+        # Vectorized implementation for performance
+        conditions = [
+            df_spine['issue_id'].notna() & df_spine['name'].notna(),
+            df_spine['issue_id'].notna()
+        ]
+        choices = [
+            "MATCHED",
+            "JIRA_ONLY (Unmapped Ticket)"
+        ]
+        df_spine['reconciliation_outcome'] = np.select(
+            conditions,
+            choices,
+            default="REGISTER_ONLY (Unmapped Product)"
+        )
 
         # Step 5: Attach Footprints from Core Products
         logger.info(f"Attaching Footprints...")
